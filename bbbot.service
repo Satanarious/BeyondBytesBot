@@ -1,0 +1,15 @@
+[Unit]
+Description=BBbot (BeyondBytes Telegram bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/bbbot
+ExecStart=/opt/bbbot/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
