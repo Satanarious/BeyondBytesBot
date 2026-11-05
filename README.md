@@ -2,8 +2,13 @@
 
 A Telegram bot for a **single group with topics** (Beyond Bytes). It has two features:
 
-1. **Per-topic RSS feeds** — each topic can be subscribed to RSS sources; new articles
-   are posted into that topic only, as article links.
+1. **Per-topic RSS feeds** — each topic can be subscribed to RSS sources. The bot
+   checks every feed quietly, collects new articles per topic, and **once a day**
+   posts a single digest per topic: Google Gemini summarizes the **top 5 stories**,
+   each summary carrying the article link to read more. The collected links are
+   stored server-side, processed by Gemini, then **deleted after the digest is
+   posted**. `/updatetime` controls feed-check frequency, `/timetopost` the daily
+   posting time.
 2. **Giveaways / gifting** — a wizard that builds a giveaway announcement with a
    name, description, image and duration, and a **🎟 Join button** — only members
    who tap it are enrolled. Giveaways are bound to the topic they were
@@ -19,6 +24,7 @@ A Telegram bot for a **single group with topics** (Beyond Bytes). It has two fea
 | `/list` | List RSS sources subscribed in the current topic |
 | `/listall` | List all RSS sources in every topic of the group |
 | `/updatetime` | Show/change how often RSS feeds are checked, e.g. `/updatetime 90` (seconds) or `/updatetime 2m`, `/updatetime 1h` — saved and applied immediately |
+| `/timetopost` | Show/change the daily digest posting time: `/timetopost 08:30` (24 h clock, UTC) — saved and applied immediately |
 | `/createnewgiveaway` | Start the giveaway wizard in the current topic |
 | `/listgiveaways` | Show running giveaways (with IDs, time left, participants) |
 | `/cancelgiveaway <id>` | Cancel a running giveaway |
@@ -40,7 +46,8 @@ giveaway ends with zero participants, it announces that no winner was drawn.
 ```
 BBbot/
 ├─ bot.py            entry point: wiring, commands, polling
-├─ rss.py            /subscribe, /unsubscribe, /list, /listall + background poller
+├─ rss.py            /subscribe, /unsubscribe, /list, /listall, /updatetime + background poller (collector)
+├─ digest.py         daily Gemini summary job + /timetopost
 ├─ giveaway.py       giveaway wizard, Join button, draw job
 ├─ db.py             SQLite storage (subscriptions, seen links, raffles, participants)
 ├─ utils.py          small helpers (topic IDs, time formatting)
@@ -69,6 +76,7 @@ BBbot/
      list - List RSS sources in this topic
      listall - List RSS sources in all topics
      updatetime - Change RSS check interval: /updatetime 5m
+     timetopost - Set daily digest time: /timetopost 08:30 (UTC)
      createnewgiveaway - Start a giveaway in this topic
      listgiveaways - Show running giveaways
      cancelgiveaway - Cancel a giveaway: /cancelgiveaway <id>

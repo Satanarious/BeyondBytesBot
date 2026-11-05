@@ -12,6 +12,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 import db
+from digest import get_digest_time
 from utils import get_thread_id, humanize_duration
 
 log = logging.getLogger("bbbot.rss")
@@ -70,26 +71,17 @@ async def fetch_feed(url):
 # ------------------------------------------------------------- poller -----
 
 async def check_feed(context, sub):
-    """Fetch one subscription; post any unseen entries as article links."""
+    """Fetch one subscription; queue unseen entries for this topic's daily digest."""
     feed_title, entries = await fetch_feed(sub["url"])
     if not sub["title"] and feed_title:
         db.update_subscription_title(sub["id"], feed_title)
 
     seen = db.seen_links(sub["id"])
-    new = [(link, title) for link, title in entries if link not in seen]
-    if not new:
-        return
-
-    thread_id = sub["thread_id"] if sub["thread_id"] != 1 else None
-    for link, title in reversed(new[:_MAX_LINKS_PER_POLL]):
-        text = f"📰 <b>{html.escape(title)}</b>\n{link}"
-        await context.bot.send_message(
-            chat_id=sub["chat_id"],
-            message_thread_id=thread_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-        )
-        db.add_seen_link(sub["id"], link)  # only mark seen after a successful send
+    for link, title in entries:
+        if link in seen:
+            continue
+        db.add_pending(sub["chat_id"], sub["thread_id"], link, title)
+        db.add_seen_link(sub["id"], link)  # never offered twice, even across digests
 
 
 async def poll_all(context: ContextTypes.DEFAULT_TYPE):
@@ -225,8 +217,10 @@ async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await status.edit_text(
         f"✅ Subscribed! <b>{html.escape(feed_title)}</b>\n"
-        f"New articles will be posted in this topic as links.\n"
-        f"Subscription ID: <code>{sub_id}</code>",
+        f"New articles are collected quietly for this topic, and a daily AI "
+        f"digest (top stories, summarized) is posted here once a day.\n"
+        f"Digest posting time: <b>{get_digest_time()}</b> UTC — /timetopost to "
+        f"change it.\nSubscription ID: <code>{sub_id}</code>",
         parse_mode=ParseMode.HTML,
     )
 

@@ -1,8 +1,9 @@
-"""SQLite storage layer for BBbot (subscriptions, seen article links, raffles)."""
+"""SQLite storage layer for BBbot (subscriptions, seen article links, digests)."""
 
 import os
 import sqlite3
 import threading
+from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "bbbot.db")
 
@@ -45,6 +46,16 @@ CREATE TABLE IF NOT EXISTS raffles (
     status      TEXT NOT NULL DEFAULT 'running',-- running / finished / cancelled
     winner_user_id INTEGER,
     winner_name TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pending_articles (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id   INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL,
+    link      TEXT NOT NULL,
+    title     TEXT,
+    added_at  TEXT NOT NULL,
+    UNIQUE (chat_id, thread_id, link)
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -175,6 +186,52 @@ def add_seen_link(sub_id, link):
             (sub_id, sub_id),
         )
         _conn().commit()
+
+
+# ---------------------------------------------------- pending articles -----
+
+PENDING_CAP = 40   # max articles kept per topic between digests
+
+
+def add_pending(chat_id, thread_id, link, title):
+    """Queue one article for the next daily digest of this topic (newest kept)."""
+    with _LOCK:
+        _conn().execute(
+            "INSERT OR IGNORE INTO pending_articles "
+            "(chat_id, thread_id, link, title, added_at) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, thread_id, link, title, datetime.now(timezone.utc).isoformat()),
+        )
+        _conn().execute(
+            "DELETE FROM pending_articles WHERE chat_id = ? AND thread_id = ? "
+            "AND id NOT IN (SELECT id FROM pending_articles "
+            "WHERE chat_id = ? AND thread_id = ? ORDER BY id DESC LIMIT ?)",
+            (chat_id, thread_id, chat_id, thread_id, PENDING_CAP),
+        )
+        _conn().commit()
+
+
+def pending_topics():
+    return _run(
+        "SELECT DISTINCT chat_id, thread_id FROM pending_articles "
+        "ORDER BY chat_id, thread_id",
+        all_rows=True,
+    ) or []
+
+
+def get_pending(chat_id, thread_id):
+    return _run(
+        "SELECT link, title, added_at FROM pending_articles "
+        "WHERE chat_id = ? AND thread_id = ? ORDER BY id",
+        (chat_id, thread_id), all_rows=True,
+    ) or []
+
+
+def clear_pending(chat_id, thread_id):
+    """Delete this topic's queued links — used right after the digest is posted."""
+    _run(
+        "DELETE FROM pending_articles WHERE chat_id = ? AND thread_id = ?",
+        (chat_id, thread_id),
+    )
 
 
 # --------------------------------------------------------------- settings ---

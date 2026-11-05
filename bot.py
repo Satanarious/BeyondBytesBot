@@ -20,6 +20,7 @@ from telegram.ext import (
 )
 
 import db
+import digest
 import giveaway
 import rss
 
@@ -41,6 +42,10 @@ async def post_init(app):
     rss.reschedule_poll(app.job_queue, interval)
     log.info("RSS poll interval: %ss", interval)
 
+    digest_hhmm = digest.reschedule_digest(app.job_queue)
+    log.info("Daily digest time: %s UTC (Gemini key %s)",
+             digest_hhmm, "loaded" if os.getenv("GEMINI_API_KEY") else "MISSING — digests will fall back to plain links")
+
     await app.bot.set_my_commands(
         [
             BotCommand("subscribe", "Subscribe this topic to an RSS feed"),
@@ -48,6 +53,7 @@ async def post_init(app):
             BotCommand("list", "List RSS sources in this topic"),
             BotCommand("listall", "List RSS sources in all topics"),
             BotCommand("updatetime", "Change RSS check interval: /updatetime 5m"),
+            BotCommand("timetopost", "Set daily digest time (UTC): /timetopost 08:30"),
             BotCommand("createnewgiveaway", "Start a giveaway in this topic"),
             BotCommand("listgiveaways", "Show running giveaways"),
             BotCommand("cancelgiveaway", "/cancelgiveaway <id>"),
@@ -88,6 +94,7 @@ def main():
     app = (ApplicationBuilder().token(token).post_init(post_init).build())
 
     app.add_handler(CommandHandler("updatetime", rss.cmd_updatetime))
+    app.add_handler(digest.build_handler())
     app.add_handler(CommandHandler("subscribe", rss.cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", rss.cmd_unsubscribe))
     app.add_handler(CommandHandler("list", rss.cmd_list))
