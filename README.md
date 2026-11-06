@@ -31,7 +31,17 @@ A Telegram bot for a **single group with topics** (Beyond Bytes). It has two fea
 | `/cancel` | Cancel the raffle wizard mid-way |
 
 Everything is stored in SQLite (`data/bbbot.db`) — subscriptions and raffles
-survive restarts. RSS is checked every 5 minutes (configurable); already published
+survive restarts.
+
+**🔒 Access rules:**
+
+- **Admin-only commands:** every `/command` requires the sender to be a group
+  admin; everyone else gets *"🔒 You should be an admin to use this command."*
+  (The 🎟 Join button is the one thing normal members interact with — that's by design.)
+- **One group only:** BBbot answers in the Beyond Bytes supergroup and replies
+  *"❌ Not meant for this group"* anywhere else (other groups, channels, DMs).
+  Lock it via `BB_GROUP_ID=<chat_id>` in `.env` (the id is shown in the `/list`
+  footer while unlocked), or let the bot auto-lock to its only known chat on startup. RSS is checked every 5 minutes (configurable); already published
 articles are never re-sent and the backlog is skipped when you first subscribe.
 
 **Note:** enrollment is join-button only — a member is in the draw if and only

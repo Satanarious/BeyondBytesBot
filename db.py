@@ -268,6 +268,11 @@ def set_announcement_message(raffle_id, message_id):
     )
 
 
+def all_raffle_chats():
+    rows = _run("SELECT DISTINCT chat_id FROM raffles", all_rows=True) or []
+    return rows
+
+
 def get_raffle(raffle_id):
     return _run("SELECT * FROM raffles WHERE id = ?", (raffle_id,), one=True)
 

@@ -21,6 +21,7 @@ from telegram.ext import (
 )
 
 import db
+from guard import admin_command, is_meant_for
 from utils import get_thread_id, humanize_duration
 
 log = logging.getLogger("bbbot.giveaway")
@@ -284,6 +285,10 @@ async def cancel_giveaway_job(job_queue, giveaway_id, status):
 
 async def on_join_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    chat = update.effective_chat
+    if chat is None or not is_meant_for(chat.id):
+        await query.answer("❌ Not meant for this group.", show_alert=True)
+        return
     user = query.from_user
     giveaway_id = int(ctx.match.group(1))
     giveaway = db.get_raffle(giveaway_id)
@@ -343,8 +348,10 @@ async def on_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     the member ever running a command before)."""
     msg = update.effective_message
     chat = update.effective_chat
-    if msg is None or chat.type not in ("group", "supergroup"):
+    if msg is None or chat is None or chat.type not in ("group", "supergroup"):
         return
+    if not is_meant_for(chat.id):
+        return  # ignore other chats entirely (keeps the DB clean)
 
     thread_id = get_thread_id(msg)
     if msg.forum_topic_created is not None:
@@ -414,7 +421,9 @@ async def cmd_cancel_conversation(update: Update, ctx: ContextTypes.DEFAULT_TYPE
 
 def build_conversation():
     return ConversationHandler(
-        entry_points=[CommandHandler("createnewgiveaway", cmd_new)],
+        entry_points=[
+            CommandHandler("createnewgiveaway", admin_command(ConversationHandler.END)(cmd_new))
+        ],
         states={
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
             DESC: [
@@ -427,6 +436,12 @@ def build_conversation():
             ],
             DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_duration)],
         },
-        fallbacks=[CommandHandler("cancel", cmd_cancel_conversation)],
+        fallbacks=[
+            CommandHandler("cancel", admin_command(ConversationHandler.END)(cmd_cancel_conversation))
+        ],
         allow_reentry=True,
     )
+
+# Individually gate the listing/cancelling commands too.
+for _name in ("cmd_listgiveaways", "cmd_cancelgiveaway"):
+    globals()[_name] = admin_command()(globals()[_name])

@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes
 
 import db
 from digest import get_digest_time
+from guard import admin_command, allowed_chat_id, is_meant_for
 from utils import get_thread_id, humanize_duration
 
 log = logging.getLogger("bbbot.rss")
@@ -72,6 +73,8 @@ async def fetch_feed(url):
 
 async def check_feed(context, sub):
     """Fetch one subscription; queue unseen entries for this topic's daily digest."""
+    if not is_meant_for(sub["chat_id"]):
+        return  # other chats don't get polled (or digested) at all
     feed_title, entries = await fetch_feed(sub["url"])
     if not sub["title"] and feed_title:
         db.update_subscription_title(sub["id"], feed_title)
@@ -264,6 +267,12 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for s in subs:
         lines.append(f"{s['id']}. {html.escape(s['title'] or s['url'])}")
         lines.append(f"    <code>{html.escape(s['url'])}</code>")
+    if allowed_chat_id() == 0:
+        lines.append("")
+        lines.append(
+            f"ℹ️ <i>Not locked to a group yet — set <code>BB_GROUP_ID={chat.id}</code> "
+            "in /opt/bbbot/.env to make BBbot Beyond-Bytes-only.</i>"
+        )
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
@@ -289,3 +298,9 @@ async def cmd_listall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  {s['id']}. {html.escape(s['title'] or s['url'])}")
         lines.append("")
     await msg.reply_text("\n".join(lines).rstrip(), parse_mode=ParseMode.HTML)
+
+# Command handlers individually; applied from the bottom so feature logic
+# stays plain (also keeps the ConversationHandler-free module tidy).
+for _name in ("cmd_subscribe", "cmd_unsubscribe", "cmd_list", "cmd_listall",
+              "cmd_updatetime"):
+    globals()[_name] = admin_command()(globals()[_name])

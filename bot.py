@@ -22,6 +22,7 @@ from telegram.ext import (
 import db
 import digest
 import giveaway
+import guard
 import rss
 
 log = logging.getLogger("bbbot")
@@ -42,9 +43,17 @@ async def post_init(app):
     rss.reschedule_poll(app.job_queue, interval)
     log.info("RSS poll interval: %ss", interval)
 
+    locked = guard.auto_lock_if_possible()
+    log.info("group lock: %s",
+             f"locked to {locked}" if locked else "NOT LOCKED (first run — will auto-lock once data exists; BB_GROUP_ID env to force)")
+
     digest_hhmm = digest.reschedule_digest(app.job_queue)
-    log.info("Daily digest time: %s UTC (Gemini key %s)",
-             digest_hhmm, "loaded" if os.getenv("GEMINI_API_KEY") else "MISSING — digests will fall back to plain links")
+    log.info("Daily digest time: %s UTC | model: %s | gap between topics: %ss | "
+             "Gemini key %s",
+             digest_hhmm,
+             os.getenv("GEMINI_MODEL") or "gemini-2.5-pro",
+             digest.DIGEST_GAP,
+             "loaded" if os.getenv("GEMINI_API_KEY") else "MISSING — digests will fall back to plain links")
 
     await app.bot.set_my_commands(
         [

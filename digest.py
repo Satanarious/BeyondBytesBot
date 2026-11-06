@@ -6,6 +6,7 @@ message: Gemini's pick of up to 5 top stories, each with the article link
 embedded. The queued links are deleted right after posting.
 """
 
+import asyncio
 import html
 import json
 import logging
@@ -19,13 +20,26 @@ from telegram.constants import ParseMode
 from telegram.ext import CommandHandler, ContextTypes
 
 import db
+from guard import admin_command, is_meant_for
 
 log = logging.getLogger("bbbot.digest")
 
 JOB_NAME = "digest_daily"
 DEFAULT_TIME = "18:00"          # UTC, 24h format
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
-_TIMEOUT = aiohttp.ClientTimeout(total=120)
+_TIMEOUT = aiohttp.ClientTimeout(total=180)
+_RETRYABLE_STATUS = {429, 500, 503}
+
+
+def _int_env(name, default, lo, hi):
+    try:
+        return max(lo, min(int(os.getenv(name) or default), hi))
+    except ValueError:
+        return default
+
+
+# seconds to wait between processing one topic's digest and the next
+DIGEST_GAP = _int_env("DIGEST_GAP_SECONDS", 90, 10, 900)
 
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
@@ -82,9 +96,15 @@ def _topic_label(titles, thread_id):
 
 
 async def process_all(context: ContextTypes.DEFAULT_TYPE):
-    """Daily job: one digest per topic that collected articles since yesterday."""
-    topics = db.pending_topics()
-    for topic in topics:
+    """Daily job: one digest per topic that collected articles since yesterday.
+
+    Topics are processed one at a time with a gap (DIGEST_GAP_SECONDS) so the
+    Gemini free-tier rate limits aren't hit by back-to-back requests.
+    """
+    topics = [t for t in db.pending_topics() if is_meant_for(t["chat_id"])]
+    for index, topic in enumerate(topics):
+        if index > 0:
+            await asyncio.sleep(DIGEST_GAP)
         try:
             await process_topic(context, topic["chat_id"], topic["thread_id"])
         except Exception:
@@ -131,7 +151,7 @@ async def summarize_with_gemini(items):
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set in /opt/bbbot/.env")
 
-    model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-pro").strip()
     whitelist = {row["link"] for row in items}
     lines = "\n".join(f"- {row['title']} — {row['link']}" for row in items)
     prompt = PROMPT_TEMPLATE.format(lines=lines)
@@ -140,22 +160,40 @@ async def summarize_with_gemini(items):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 4096,
             "responseMimeType": "application/json",
             "thinkingConfig": {"thinkingBudget": 0},
         },
     }
 
+    data = None
+    status = None
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-        async with session.post(
-            _GEMINI_URL.format(model=model),
-            json=payload,
-            headers={"x-goog-api-key": api_key},
-        ) as resp:
-            if resp.status != 200:
-                body = (await resp.text())[:300]
-                raise RuntimeError(f"gemini HTTP {resp.status}: {body}")
-            data = await resp.json()
+        for attempt in (1, 2, 3):
+            async with session.post(
+                _GEMINI_URL.format(model=model),
+                json=payload,
+                headers={"x-goog-api-key": api_key},
+            ) as resp:
+                status = resp.status
+                if status == 200:
+                    data = await resp.json()
+                    break
+                if status in _RETRYABLE_STATUS and attempt < 3:
+                    wait = 30 * attempt
+                    log.warning("gemini HTTP %s (attempt %d/3, topic pending); "
+                                "retrying in %ss", status, attempt, wait)
+                elif status in _RETRYABLE_STATUS:
+                    body = (await resp.text())[:200]
+                    raise RuntimeError(
+                        f"gemini HTTP {status} after {attempt} attempts: {body}"
+                    )
+                else:
+                    body = (await resp.text())[:300]
+                    raise RuntimeError(f"gemini HTTP {status}: {body}")
+            await asyncio.sleep(wait)
+        else:
+            raise RuntimeError(f"gemini kept failing (last HTTP {status})")
 
     candidates = data.get("candidates") or []
     parts = ((candidates or [{}])[0].get("content") or {}).get("parts") or []
@@ -261,4 +299,4 @@ async def cmd_timetopost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 def build_handler():
-    return CommandHandler("timetopost", cmd_timetopost)
+    return CommandHandler("timetopost", admin_command()(cmd_timetopost))
