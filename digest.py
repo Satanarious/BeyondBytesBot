@@ -170,31 +170,31 @@ async def summarize_with_gemini(items):
         if fallback and fallback not in models:
             models.append(fallback)
 
-    gen_config = {
-        "temperature": 0.3,
-        "maxOutputTokens": 4096,
-        "responseMimeType": "application/json",
-    }
-    if "pro" not in primary:
-        # Flash/lite models support disabling thinking; Pro REJECTS budget 0
-        # (thinking is mandatory there) and would 400 on every request.
-        gen_config["thinkingConfig"] = {"thinkingBudget": 0}
-
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": gen_config,
-    }
-
     data = None
     last_error = None
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
         for model in models:
+            # build payload per model: thinking rules differ between 2.5 and 3.x
+            gen_config = {
+                "temperature": 0.3,
+                "maxOutputTokens": 4096,
+                "responseMimeType": "application/json",
+            }
+            if model.startswith("gemini-2.5"):
+                # Only legacy 2.5 flash/lite models support disabling thinking
+                # via thinkingBudget. Gemini 3.x removed that parameter (they
+                # use thinkingLevel) and reject thinkingBudget with HTTP 400.
+                gen_config["thinkingConfig"] = {"thinkingBudget": 0}
+            model_payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": gen_config,
+            }
             status = None
             try:
                 for attempt in (1, 2, 3):
                     async with session.post(
                         _GEMINI_URL.format(model=model),
-                        json=payload,
+                        json=model_payload,
                         headers={"x-goog-api-key": api_key},
                     ) as resp:
                         status = resp.status
