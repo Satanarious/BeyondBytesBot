@@ -52,7 +52,7 @@ async def post_init(app):
     log.info("Daily digest time: %s UTC | model: %s | gap between topics: %ss | "
              "Gemini key %s",
              digest_hhmm,
-             os.getenv("GEMINI_MODEL") or "gemini-3.1-pro-preview",
+             os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite",
              digest.DIGEST_GAP,
              "loaded" if os.getenv("GEMINI_API_KEY") else "MISSING — digests will fall back to plain links")
 

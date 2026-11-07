@@ -30,6 +30,8 @@ DEFAULT_TIME = "18:00"          # UTC, 24h format
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _TIMEOUT = aiohttp.ClientTimeout(total=180)
 _RETRYABLE_STATUS = {429, 500, 503}
+# tried in order when the primary model is dead (404) or out of quota (429)
+FALLBACK_MODELS = ("gemini-3.1-flash-lite", "gemini-2.5-flash-lite")
 
 
 def _int_env(name, default, lo, hi):
@@ -122,7 +124,7 @@ async def process_topic(context, chat_id, thread_id):
     send_thread = thread_id if thread_id != 1 else None
 
     log.info("digest: %d collected for '%s' (model %s)", len(items), label,
-             os.getenv("GEMINI_MODEL") or "gemini-3.1-pro-preview")
+             os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite")
     try:
         picks = await summarize_with_gemini(items)
         text = _render_digest(picks, label)
@@ -154,18 +156,27 @@ async def summarize_with_gemini(items):
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set in /opt/bbbot/.env")
 
-    model = (os.getenv("GEMINI_MODEL") or "gemini-3.1-pro-preview").strip()
     whitelist = {row["link"] for row in items}
     lines = "\n".join(f"- {row['title']} — {row['link']}" for row in items)
     prompt = PROMPT_TEMPLATE.format(lines=lines)
+
+    # Model chain: configured/default first, then automatic fallbacks.
+    # Default is a Flash-Lite: on the free tier those get ~500 RPD vs ~20 RPD
+    # for Flash and no free quota for Pro-class/preview models. If one model
+    # is retired (404) or its quota is exhausted (429), the next is tried.
+    primary = (os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
+    models = [primary]
+    for fallback in FALLBACK_MODELS:
+        if fallback and fallback not in models:
+            models.append(fallback)
 
     gen_config = {
         "temperature": 0.3,
         "maxOutputTokens": 4096,
         "responseMimeType": "application/json",
     }
-    if "pro" not in model:
-        # Flash models support disabling thinking; 2.5 Pro REJECTS budget 0
+    if "pro" not in primary:
+        # Flash/lite models support disabling thinking; Pro REJECTS budget 0
         # (thinking is mandatory there) and would 400 on every request.
         gen_config["thinkingConfig"] = {"thinkingBudget": 0}
 
@@ -175,33 +186,60 @@ async def summarize_with_gemini(items):
     }
 
     data = None
-    status = None
+    last_error = None
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-        for attempt in (1, 2, 3):
-            async with session.post(
-                _GEMINI_URL.format(model=model),
-                json=payload,
-                headers={"x-goog-api-key": api_key},
-            ) as resp:
-                status = resp.status
-                if status == 200:
-                    data = await resp.json()
-                    break
-                if status in _RETRYABLE_STATUS and attempt < 3:
-                    wait = 30 * attempt
-                    log.warning("gemini HTTP %s (attempt %d/3, topic pending); "
-                                "retrying in %ss", status, attempt, wait)
-                elif status in _RETRYABLE_STATUS:
-                    body = (await resp.text())[:200]
-                    raise RuntimeError(
-                        f"gemini HTTP {status} after {attempt} attempts: {body}"
-                    )
+        for model in models:
+            status = None
+            try:
+                for attempt in (1, 2, 3):
+                    async with session.post(
+                        _GEMINI_URL.format(model=model),
+                        json=payload,
+                        headers={"x-goog-api-key": api_key},
+                    ) as resp:
+                        status = resp.status
+                        if status == 200:
+                            data = await resp.json()
+                            break
+                        if status in _RETRYABLE_STATUS and attempt < 3:
+                            wait = 30 * attempt
+                            log.warning("gemini %s HTTP %s (attempt %d/3); "
+                                        "retrying in %ss", model, status, attempt, wait)
+                        elif status in _RETRYABLE_STATUS:
+                            body = (await resp.text())[:200]
+                            last_error = (model, status, body)
+                            log.warning("gemini %s exhausted retries (HTTP %s)",
+                                        model, status)
+                            break
+                        else:
+                            body = (await resp.text())[:300]
+                            if status in (400, 401, 403):
+                                # key/config problems never improve by switching
+                                raise RuntimeError(f"gemini HTTP {status}: {body}")
+                            last_error = (model, status, body)
+                            log.warning("gemini %s HTTP %s; trying next model",
+                                        model, status)
+                            break
+                    await asyncio.sleep(wait)
                 else:
-                    body = (await resp.text())[:300]
-                    raise RuntimeError(f"gemini HTTP {status}: {body}")
-            await asyncio.sleep(wait)
-        else:
-            raise RuntimeError(f"gemini kept failing (last HTTP {status})")
+                    last_error = (model, status, "no response")
+                    log.warning("gemini %s: request loop exhausted; trying next model", model)
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                last_error = (model, None, str(exc))
+                log.warning("gemini %s network error: %s", model, exc)
+
+            if data is not None:
+                break
+
+    if data is None:
+        code = last_error[1] if last_error else "?"
+        detail = (last_error[2][:200] if last_error and last_error[2] else "")
+        raise RuntimeError(
+            f"gemini unusable across models {', '.join(models)} "
+            f"(last HTTP {code}): {detail}"
+        )
 
     candidates = data.get("candidates") or []
     parts = ((candidates or [{}])[0].get("content") or {}).get("parts") or []
