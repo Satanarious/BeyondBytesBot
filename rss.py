@@ -159,7 +159,7 @@ async def cmd_updatetime(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     db.set_setting("rss_poll_seconds", seconds)
-    reschedule_poll(update.get_bot().job_queue, seconds)
+    reschedule_poll(ctx.job_queue, seconds)
     log.info("RSS poll interval changed to %ss", seconds)
     await msg.reply_text(
         f"✅ RSS update check set to every <b>{humanize_duration(seconds)}</b> "

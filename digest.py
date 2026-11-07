@@ -122,7 +122,7 @@ async def process_topic(context, chat_id, thread_id):
     send_thread = thread_id if thread_id != 1 else None
 
     log.info("digest: %d collected for '%s' (model %s)", len(items), label,
-             os.getenv("GEMINI_MODEL") or "gemini-2.5-pro")
+             os.getenv("GEMINI_MODEL") or "gemini-3.1-pro-preview")
     try:
         picks = await summarize_with_gemini(items)
         text = _render_digest(picks, label)
@@ -154,7 +154,7 @@ async def summarize_with_gemini(items):
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set in /opt/bbbot/.env")
 
-    model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-pro").strip()
+    model = (os.getenv("GEMINI_MODEL") or "gemini-3.1-pro-preview").strip()
     whitelist = {row["link"] for row in items}
     lines = "\n".join(f"- {row['title']} — {row['link']}" for row in items)
     prompt = PROMPT_TEMPLATE.format(lines=lines)
