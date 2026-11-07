@@ -25,6 +25,7 @@ A Telegram bot for a **single group with topics** (Beyond Bytes). It has two fea
 | `/listall` | List all RSS sources in every topic of the group |
 | `/updatetime` | Show/change how often RSS feeds are checked, e.g. `/updatetime 90` (seconds) or `/updatetime 2m`, `/updatetime 1h` — saved and applied immediately |
 | `/timetopost` | Show/change the daily digest posting time: `/timetopost 08:30` (24 h clock, UTC) — saved and applied immediately |
+| `/digestnow` | Build & post this topic's digest right now (admin, testing — doesn't wait for the daily time) |
 | `/createnewgiveaway` | Start the giveaway wizard in the current topic |
 | `/listgiveaways` | Show running giveaways (with IDs, time left, participants) |
 | `/cancelgiveaway <id>` | Cancel a running giveaway |
@@ -57,7 +58,7 @@ giveaway ends with zero participants, it announces that no winner was drawn.
 BBbot/
 ├─ bot.py            entry point: wiring, commands, polling
 ├─ rss.py            /subscribe, /unsubscribe, /list, /listall, /updatetime + background poller (collector)
-├─ digest.py         daily Gemini summary job + /timetopost
+├─ digest.py         daily Gemini summary job + /timetopost, /digestnow
 ├─ giveaway.py       giveaway wizard, Join button, draw job
 ├─ db.py             SQLite storage (subscriptions, seen links, raffles, participants)
 ├─ utils.py          small helpers (topic IDs, time formatting)
@@ -87,6 +88,7 @@ BBbot/
      listall - List RSS sources in all topics
      updatetime - Change RSS check interval: /updatetime 5m
      timetopost - Set daily digest time: /timetopost 08:30 (UTC)
+     digestnow - Build this topic's digest now (admin)
      createnewgiveaway - Start a giveaway in this topic
      listgiveaways - Show running giveaways
      cancelgiveaway - Cancel a giveaway: /cancelgiveaway <id>

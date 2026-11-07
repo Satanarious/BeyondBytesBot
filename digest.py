@@ -21,6 +21,7 @@ from telegram.ext import CommandHandler, ContextTypes
 
 import db
 from guard import admin_command, is_meant_for
+from utils import get_thread_id
 
 log = logging.getLogger("bbbot.digest")
 
@@ -120,6 +121,8 @@ async def process_topic(context, chat_id, thread_id):
     label = _topic_label(titles, thread_id)
     send_thread = thread_id if thread_id != 1 else None
 
+    log.info("digest: %d collected for '%s' (model %s)", len(items), label,
+             os.getenv("GEMINI_MODEL") or "gemini-2.5-pro")
     try:
         picks = await summarize_with_gemini(items)
         text = _render_digest(picks, label)
@@ -156,14 +159,19 @@ async def summarize_with_gemini(items):
     lines = "\n".join(f"- {row['title']} — {row['link']}" for row in items)
     prompt = PROMPT_TEMPLATE.format(lines=lines)
 
+    gen_config = {
+        "temperature": 0.3,
+        "maxOutputTokens": 4096,
+        "responseMimeType": "application/json",
+    }
+    if "pro" not in model:
+        # Flash models support disabling thinking; 2.5 Pro REJECTS budget 0
+        # (thinking is mandatory there) and would 400 on every request.
+        gen_config["thinkingConfig"] = {"thinkingBudget": 0}
+
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.3,
-            "maxOutputTokens": 4096,
-            "responseMimeType": "application/json",
-            "thinkingConfig": {"thinkingBudget": 0},
-        },
+        "generationConfig": gen_config,
     }
 
     data = None
@@ -254,6 +262,31 @@ def _fallback_digest(items, label):
 
 # ------------------------------------------------------------ commands ------
 
+async def cmd_digestnow(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: build & post the digest for THIS topic right now (for testing)."""
+    msg = update.effective_message
+    thread_id = get_thread_id(msg)
+    items = db.get_pending(update.effective_chat.id, thread_id)
+    if not items:
+        await msg.reply_text(
+            "📭 Nothing collected in this topic yet. Feeds collect quietly — "
+            "lower /updatetime or wait a while, then /digestnow again.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    class _Ctx:
+        bot = update.get_bot()
+
+    await process_topic(_Ctx(), update.effective_chat.id, thread_id)
+    await msg.reply_text(
+        f"✅ Digest attempted with {len(items)} collected article(s) — the result "
+        "should be just above. If it says 'AI summary unavailable', check "
+        "`journalctl -u bbbot | grep -i gemini` for the exact reason.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_timetopost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     current = get_digest_time()
@@ -299,4 +332,9 @@ async def cmd_timetopost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 def build_handler():
-    return CommandHandler("timetopost", admin_command()(cmd_timetopost))
+    return CommandHandler("timetopost", cmd_timetopost)
+
+
+# Both admin commands are wrapped here, after their definitions.
+cmd_digestnow = admin_command()(cmd_digestnow)
+cmd_timetopost = admin_command()(cmd_timetopost)

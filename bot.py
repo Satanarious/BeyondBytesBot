@@ -63,6 +63,7 @@ async def post_init(app):
             BotCommand("listall", "List RSS sources in all topics"),
             BotCommand("updatetime", "Change RSS check interval: /updatetime 5m"),
             BotCommand("timetopost", "Set daily digest time (UTC): /timetopost 08:30"),
+            BotCommand("digestnow", "Build this topic's digest now (admin, for testing)"),
             BotCommand("createnewgiveaway", "Start a giveaway in this topic"),
             BotCommand("listgiveaways", "Show running giveaways"),
             BotCommand("cancelgiveaway", "/cancelgiveaway <id>"),
@@ -104,6 +105,7 @@ def main():
 
     app.add_handler(CommandHandler("updatetime", rss.cmd_updatetime))
     app.add_handler(digest.build_handler())
+    app.add_handler(CommandHandler("digestnow", digest.cmd_digestnow))
     app.add_handler(CommandHandler("subscribe", rss.cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", rss.cmd_unsubscribe))
     app.add_handler(CommandHandler("list", rss.cmd_list))
