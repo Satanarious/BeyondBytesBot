@@ -15,6 +15,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
+    Defaults,
     MessageHandler,
     filters,
 )
@@ -101,7 +102,13 @@ def main():
             "you get from @BotFather."
         )
 
-    app = (ApplicationBuilder().token(token).post_init(post_init).build())
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .defaults(Defaults(do_quote=False))
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("updatetime", rss.cmd_updatetime))
     app.add_handler(digest.build_handler())
