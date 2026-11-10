@@ -24,6 +24,7 @@ import db
 import digest
 import giveaway
 import guard
+import media
 import rss
 
 log = logging.getLogger("bbbot")
@@ -69,6 +70,10 @@ async def post_init(app):
             BotCommand("listgiveaways", "Show running giveaways"),
             BotCommand("cancelgiveaway", "/cancelgiveaway <id>"),
             BotCommand("cancel", "Cancel the current operation"),
+            BotCommand("anime", "Anime info (MAL→AniList): /anime chainsaw man"),
+            BotCommand("eac", "Manga/manhwa/manhua: /eac solo leveling"),
+            BotCommand("books", "Book info (OpenLibrary): /books dune"),
+            BotCommand("comics", "Comics (ComicVine→OpenLibrary): /comics batman"),
         ]
     )
 
@@ -121,6 +126,8 @@ def main():
     app.add_handler(CommandHandler("cancelgiveaway", giveaway.cmd_cancelgiveaway))
 
     app.add_handler(giveaway.build_conversation())                     # group 0
+    for handler in media.build_handlers():                             # group 0
+        app.add_handler(handler)
     app.add_handler(                                                   # group 1
         CallbackQueryHandler(giveaway.on_join_button, pattern=r"^rjoin:(\d+)$")
     )

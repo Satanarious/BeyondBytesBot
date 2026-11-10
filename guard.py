@@ -138,3 +138,28 @@ def admin_command(block_result=None):
         wrapper.__name__ = getattr(fn, "__name__", "admin_command")
         return wrapper
     return deco
+
+
+def group_command(block_result=None):
+    """Decorator: restrict a command handler to the locked group, but allow
+    ALL members (no admin check). Used for member-facing lookups
+    (/anime, /eac, /books, /comics...)."""
+    def deco(fn):
+        async def wrapper(update, context):
+            chat = update.effective_chat
+            if chat is None:
+                return block_result
+            if chat.type == "channel":
+                return None  # silently ignore channel posts
+            if not is_meant_for(chat.id):
+                try:
+                    await update.effective_message.reply_text(
+                        WRONG_GROUP, parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
+                return block_result
+            return await fn(update, context)
+        wrapper.__name__ = getattr(fn, "__name__", "group_command")
+        return wrapper
+    return deco

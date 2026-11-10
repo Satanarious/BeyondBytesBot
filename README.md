@@ -33,6 +33,10 @@ A Telegram bot for a **single group with topics** (Beyond Bytes). It has two fea
 | `/createnewgiveaway` | Start the giveaway wizard in the current topic |
 | `/listgiveaways` | Show running giveaways (with IDs, time left, participants) |
 | `/cancelgiveaway <id>` | Cancel a running giveaway |
+| `/anime` | Anime info from MyAnimeList (AniList fallback) — **any member**: `/anime chainsaw man` |
+| `/eac` | Manga / manhwa / manhua from MAL (AniList fallback) — **any member**: `/eac solo leveling` |
+| `/books` (alias `/book`) | Book info from OpenLibrary — **any member**: `/books dune` |
+| `/comics` (alias `/comic`) | Comic info from ComicVine (OpenLibrary fallback) — **any member**: `/comics batman` |
 | `/cancel` | Cancel the raffle wizard mid-way |
 
 Everything is stored in SQLite (`data/bbbot.db`) — subscriptions and raffles
@@ -96,6 +100,10 @@ BBbot/
      createnewgiveaway - Start a giveaway in this topic
      listgiveaways - Show running giveaways
      cancelgiveaway - Cancel a giveaway: /cancelgiveaway <id>
+     anime - Anime info (MAL→AniList): /anime chainsaw man
+     eac - Manga/manhwa/manhua: /eac solo leveling
+     books - Book info (OpenLibrary): /books dune
+     comics - Comics (ComicVine→OpenLibrary): /comics batman
      cancel - Cancel the current operation
      ```
 5. Optional: `/setuserpic` to add a profile image.

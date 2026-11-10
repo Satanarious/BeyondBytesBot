@@ -5,7 +5,7 @@ def get_thread_id(message):
     """Normalize the forum topic id. The General topic is thread 1."""
     if message is None:
         return 1
-    return message.message_thread_id or 1
+    return getattr(message, "message_thread_id", None) or 1
 
 
 def humanize_duration(seconds: float) -> str:
