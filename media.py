@@ -361,6 +361,159 @@ async def _ol_enrich(row):
     return row
 
 
+# ---------------------------------------------------------------- IMDb ------
+
+_IMDB_SUGGEST_URL = "https://v3.sg.media-imdb.com/suggestion/x/{q}.json"
+_IMDB_TYPES = {
+    "movie": "Movie", "tvSeries": "TV Series", "tvMiniSeries": "TV Mini Series",
+    "short": "Short", "tvShort": "TV Short", "tvEpisode": "Episode",
+    "video": "Video", "videoGame": "Video Game", "musicVideo": "Music Video",
+    "podcastSeries": "Podcast Series", "tvSpecial": "TV Special",
+}
+
+
+def _human_duration(minutes):
+    try:
+        total = int(str(minutes).split()[0])
+    except (ValueError, IndexError):
+        return ""
+    h, m = total // 60, total % 60
+    if h and m:
+        return f"{h}h {m}m"
+    if h:
+        return f"{h}h"
+    return f"{m}m"
+
+
+async def _imdb_search(session, q, limit=8):
+    """Keyless search via IMDb's own suggestion endpoint (what imdb.com's
+    search box uses). Rows are thin; the detail card needs either OMDb or the
+    suggestion fields alone."""
+    from urllib.parse import quote as _urlquote
+    data = await _get_json(session, _IMDB_SUGGEST_URL.format(q=_urlquote(q.strip())))
+    rows = []
+    for item in (data.get("d") or []):
+        if not str(item.get("id") or "").startswith("tt"):
+            continue                     # skip people & companies in results
+        imdb_id = item["id"]
+        poster = ((item.get("i") or {}).get("imageUrl") or "")
+        year = item.get("y") or item.get("tl") or ""
+        stars = _strip_html(item.get("s") or "")
+        items = []
+        kind = _IMDB_TYPES.get(item.get("qid") or item.get("q") or "",
+                              _strip_html(item.get("qid") or "").title())
+        if kind:
+            items.append(f"Type: {kind}")
+        if year:
+            items.append(f"Year: {year}")
+        if stars:
+            items.append(f"Starring: {stars[:120]}")
+        rows.append({
+            "title": _strip_html(item.get("l")) or "Unknown title",
+            "url": f"https://www.imdb.com/title/{imdb_id}/",
+            "image": _abs_url(poster),
+            "score": None,           # IMDb rating arrives via _imdb_enrich
+            "score_scale": 10,
+            "source": "IMDb",
+            "source_url": "IMDb",
+            "button_line": " · ".join(
+                part for part in (
+                    str(year), _strip_html(stars[:64]) if stars else "",
+                ) if part
+            ),
+            "details": items,
+            "synopsis": "",
+            "imdb_id": imdb_id,
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+async def _lookup_imdb(session, q):
+    rows = await _imdb_search(session, q)
+    note = None
+    if rows and not (os.getenv("OMDB_API_KEY") or "").strip():
+        note = "add OMDB_API_KEY for rating & plot (free key at omdbapi.com)"
+    return rows, note
+
+
+async def _imdb_enrich(row):
+    """Fetch full title details via OMDb (free key) for the tapped card.
+    Survives a missing/invalid key — suggestion-level data still renders."""
+    imdb_id = row.get("imdb_id")
+    if not imdb_id:
+        return row
+    api_key = (os.getenv("OMDB_API_KEY") or "").strip()
+    if not api_key:
+        return row
+    timeout = aiohttp.ClientTimeout(total=10, connect=5)
+    async with aiohttp.ClientSession(
+        timeout=timeout, headers={"User-Agent": _UA}
+    ) as session:
+        try:
+            data = await _get_json(
+                session, "https://www.omdbapi.com/",
+                params={"i": imdb_id, "plot": "full", "r": "json",
+                        "apikey": api_key},
+            )
+        except Exception as exc:
+            log.info("imdb enrich: OMDb failed for %s (%s)", imdb_id, exc)
+            return row
+    if (data.get("Response") or "").lower() != "true":
+        log.info("imdb enrich: OMDb error for %s: %s",
+                 imdb_id, data.get("Error"))
+        return row
+
+    items = []
+    rated = data.get("Rated")
+    if rated and rated not in ("N/A", "Not Rated", "Unrated"):
+        items.append(f"Rated: {rated}")
+    runtime = _human_duration(data.get("Runtime"))
+    if runtime:
+        items.append(f"Runtime: {runtime}")
+    released = data.get("Released")
+    if released and released != "N/A":
+        items.append(f"Released: {released}")
+    director = data.get("Director")
+    if director and director != "N/A":
+        items.append(f"Director: {director}")
+    votes = data.get("imdbVotes")
+    if votes and votes != "N/A":
+        votes = str(votes).strip()
+        if votes.replace(",", "").isdigit():
+            items.append(f"Votes: {int(votes.replace(',', '')):,}")
+        else:
+            items.append(f"Votes: {votes}")
+    awards = data.get("Awards")
+    if awards and awards not in ("N/A", ""):
+        items.append(f"Awards: {awards[:200]}")
+
+    genres = [g.strip() for g in (data.get("Genre") or "").split(",")
+              if g.strip() and g.strip() != "N/A"]
+    if genres:
+        items.append("Genres: " + ", ".join(genres[:6]))
+
+    plot = _strip_html(data.get("Plot") or "")
+    rating = data.get("imdbRating")
+    if rating and rating not in ("N/A",):
+        try:
+            row["score"] = float(rating)
+            row["score_scale"] = 10
+        except ValueError:
+            pass
+
+    merged = [line for line in (row.get("details") or [])
+              if not str(line).startswith(("Genres", "Starring"))]
+    starring = _strip_html(data.get("Actors") or "")
+    if starring and starring != "N/A":
+        merged.append(f"Starring: {starring[:150]}")
+    row["details"] = merged + items
+    if plot:
+        row["synopsis"] = plot
+    return row
+
+
 # ------------------------------------------------------------- lookups ------
 
 async def _lookup_anime(session, q):
@@ -653,6 +806,11 @@ async def on_look_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 row = await _ol_enrich(row)
             except Exception as exc:
                 log.info("ol enrich failed on tap (%s)", exc)
+        if row.get("imdb_id"):
+            try:
+                row = await _imdb_enrich(row)
+            except Exception as exc:
+                log.info("imdb enrich failed on tap (%s)", exc)
         try:
             await query.message.delete()    # list goes away once a pick is made
         except Exception:
@@ -668,6 +826,7 @@ _LOOKUPS = {
     "eac": _lookup_manga,
     "comic": _lookup_comic,
     "book": _lookup_book,
+    "imdb": _lookup_imdb,
 }
 
 _HEADERS = {
@@ -675,6 +834,7 @@ _HEADERS = {
     "eac": "📚 Manga / manhwa / manhua results",
     "comic": "💥 Comic results",
     "book": "📖 Book results",
+    "imdb": "🎥 IMDb results",
 }
 
 _EXAMPLES = {
@@ -682,6 +842,7 @@ _EXAMPLES = {
     "eac": "solo leveling",
     "comic": "batman year one",
     "book": "dune frank herbert",
+    "imdb": "inception",
 }
 
 
@@ -743,6 +904,7 @@ cmd_anime = group_command()(_make_cmd("anime"))
 cmd_eac = group_command()(_make_cmd("eac"))
 cmd_comic = group_command()(_make_cmd("comic"))
 cmd_book = group_command()(_make_cmd("book"))
+cmd_imdb = group_command()(_make_cmd("imdb"))
 
 
 def build_handlers():
@@ -754,5 +916,6 @@ def build_handlers():
         CommandHandler("book", cmd_book),
         CommandHandler("books", cmd_book),      # plural alias
         CommandHandler("comics", cmd_comic),    # plural alias
+        CommandHandler("imdb", cmd_imdb),
     ]
     return handlers
