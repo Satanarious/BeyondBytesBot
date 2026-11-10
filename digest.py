@@ -13,6 +13,7 @@ import logging
 import os
 import re
 from datetime import datetime, time, timezone
+from urllib.parse import urljoin
 
 import aiohttp
 from telegram import InputMediaPhoto, LinkPreviewOptions, Update
@@ -139,6 +140,8 @@ async def process_topic(context, chat_id, thread_id):
                  "url": row["link"], "image": images.get(row["link"], "")}
                 for row in items[:5]]
         note = "⚠️ AI summary unavailable today"
+
+    await _enrich_images(rows, label)
 
     posted = False
     try:
@@ -332,6 +335,92 @@ async def _send_rich(context, chat_id, thread, rows, label, note=None):
             "rich_message": rich,
         },
     )
+
+
+_ARTICLE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+_ARTICLE_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
+_MAX_HTML_BYTES = 400_000   # og:image lives in <head>; no need to read the page fully
+
+_META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.I)
+_META_CONTENT_RE = re.compile(r"""content\s*=\s*["']([^"']+)["']""", re.I)
+_JSONLD_IMG_RE = re.compile(
+    r'"image"\s*:\s*"(https?://[^"\s]+\.(?:jpg|jpeg|png|webp|gif)[^"]*)"', re.I
+)
+_IMG_TAG_RE = re.compile(
+    r"""<img[^>]+src\s*=\s*["']([^"']+)["']""", re.I
+)
+
+
+def _meta_tag_image(tag, base_url):
+    low = tag.lower()
+    is_og = ('property="og:image"' in low or "property='og:image'" in low)
+    is_tw = ('name="twitter:image"' in low or "name='twitter:image'" in low or
+             'name="twitter:image:src"' in low or "name='twitter:image:src'" in low)
+    if not (is_og or is_tw):
+        return None
+    m = _META_CONTENT_RE.search(tag)
+    if m and m.group(1).strip():
+        return urljoin(base_url, m.group(1).strip())
+    return None
+
+
+def _extract_image_from_html(text, base_url):
+    """og:image > twitter:image > JSON-LD image > first content <img>. Relative
+    URLs are resolved, but relative-only <img> sources are skipped (Telegram
+    media blocks need absolute http(s) URLs)."""
+    for tag in _META_TAG_RE.findall(text):
+        found = _meta_tag_image(tag, base_url)
+        if found:
+            return found
+    m = _JSONLD_IMG_RE.search(text)
+    if m:
+        return m.group(1)
+    m = _IMG_TAG_RE.search(text)
+    if m:
+        joined = urljoin(base_url, m.group(1))
+        return joined if joined.startswith("http") else None
+    return None
+
+
+async def _article_image(url):
+    """Fetch the article page and pull the og:image-style image (or None)."""
+    try:
+        async with aiohttp.ClientSession(
+            timeout=_ARTICLE_TIMEOUT, headers={"User-Agent": _ARTICLE_UA}
+        ) as session:
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return None
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                data = b""
+                async for chunk in resp.content.iter_chunked(65536):
+                    data += chunk
+                    if len(data) >= _MAX_HTML_BYTES:
+                        break
+                if "html" not in ctype and "xml" not in ctype and "text" not in ctype:
+                    return None
+                text = data.decode("utf-8", "ignore")
+                return _extract_image_from_html(text, str(url))
+    except Exception as exc:
+        log.debug("article image fetch failed for %s: %s", url[:120], exc)
+        return None
+
+
+async def _enrich_images(rows, label):
+    """Fill in missing images from the article pages themselves (og:image)."""
+    missing = [r for r in rows if not _clean_url(r.get("image"))]
+    if not missing:
+        return
+    got = 0
+    for row in missing:
+        img = await _article_image(row["url"])
+        if img and _clean_url(img):
+            row["image"] = img
+            got += 1
+    if got or len(missing) <= 5:
+        log.info("digest images: +%d og:image from article pages (%s, %d were missing)",
+                 got, label, len(missing))
 
 
 def _text_block(numbered_rows, label, note):
