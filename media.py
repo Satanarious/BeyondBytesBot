@@ -314,8 +314,51 @@ async def _openlibrary_search(session, q, subject=None, limit=8):
                             else str(item.get("first_publish_year") or "")),
             "details": items,
             "synopsis": first,
+            "work_key": work_key,
         })
     return rows
+
+
+async def _ol_enrich(row):
+    """Lazy detail fetch for OpenLibrary rows: description from the work
+    document and rating/counts from the ratings endpoint (search results
+    frequently omit both). Mutates + returns the row."""
+    key = row.get("work_key")
+    if not key:
+        return row
+    timeout = aiohttp.ClientTimeout(total=10, connect=5)
+    async with aiohttp.ClientSession(timeout=timeout, headers=_OL_HEADERS) as session:
+        if not (row.get("synopsis") or "").strip():
+            try:
+                work = await _get_json(session, f"{_OL_URL}{key}.json")
+                desc = work.get("description")
+                if isinstance(desc, dict):
+                    desc = desc.get("value")
+                row["synopsis"] = _strip_html(str(desc if isinstance(desc, str) else "")) \
+                    if desc else ""
+                if row.get("synopsis"):
+                    log.info("ol enrich: description for %s (%d chars)",
+                             key, len(row["synopsis"]))
+            except Exception as exc:
+                log.info("ol enrich: no description for %s (%s)", key, exc)
+        if row.get("score") in (None, "", 0):
+            try:
+                ratings = await _get_json(session, f"{_OL_URL}{key}/ratings.json")
+                summary = ratings.get("summary") or {}
+                avg = summary.get("average")
+                if avg:
+                    row["score"] = avg
+                    row["score_scale"] = 5
+                    if summary.get("count") and not any(
+                        str(x).lower().startswith("ratings")
+                        for x in (row.get("details") or [])
+                    ):
+                        row["details"] = list(row.get("details") or []) + [
+                            f"Ratings: {summary['count']:,}",
+                        ]
+            except Exception as exc:
+                log.info("ol enrich: no ratings for %s (%s)", key, exc)
+    return row
 
 
 # ------------------------------------------------------------- lookups ------
@@ -392,7 +435,8 @@ def _score_text(row, short=False):
     score, scale = row.get("score"), row.get("score_scale")
     if score in (None, "", 0):
         return None
-    value = f"{round(score, 1)}" if scale == 10 else f"{round(score, 0):.0f}"
+    decimals = 1 if scale in (5, 10) else 0
+    value = f"{round(score, decimals)}"
     if short:
         return f"⭐{value}" if scale != 5 else f"⭐{value}"
     unit = {"10": "/10", "100": "/100", "5": "/5"}.get(str(scale), "")
@@ -602,6 +646,13 @@ async def on_look_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = rows[idx]
         thread = entry["thread"]
         _SUGGEST_CACHE.pop(qid, None)
+        # OpenLibrary rows lack description/ratings in search output — fetch
+        # them now so the detail card is full.
+        if row.get("work_key"):
+            try:
+                row = await _ol_enrich(row)
+            except Exception as exc:
+                log.info("ol enrich failed on tap (%s)", exc)
         try:
             await query.message.delete()    # list goes away once a pick is made
         except Exception:
