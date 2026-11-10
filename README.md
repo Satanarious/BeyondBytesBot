@@ -37,6 +37,8 @@ A Telegram bot for a **single group with topics** (Beyond Bytes). It has two fea
 | `/eac` | Manga / manhwa / manhua from MAL (AniList fallback) — **any member**: `/eac solo leveling` |
 | `/books` (alias `/book`) | Book info from OpenLibrary — **any member**: `/books dune` |
 | `/comics` (alias `/comic`) | Comic info from ComicVine (OpenLibrary fallback) — **any member**: `/comics batman` |
+
+**Lookup UX:** every lookup shows a **tappable suggestion list** (5 per page, ◀▶ to scroll, ✖ to close). Tap an entry and the list disappears and a **detailed card** is posted in that topic: cover art inline, title link, score/author/episodes/publisher meta lines, genres, and the full synopsis in an expandable quote. No API keys needed for `/anime`, `/eac`, `/books` (`/comics` is richer with a free ComicVine key).
 | `/cancel` | Cancel the raffle wizard mid-way |
 
 Everything is stored in SQLite (`data/bbbot.db`) — subscriptions and raffles

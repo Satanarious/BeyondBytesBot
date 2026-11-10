@@ -131,6 +131,9 @@ def main():
     app.add_handler(                                                   # group 1
         CallbackQueryHandler(giveaway.on_join_button, pattern=r"^rjoin:(\d+)$")
     )
+    app.add_handler(                                                   # group 1
+        CallbackQueryHandler(media.on_look_callback, pattern=r"^lk")
+    )
     app.add_handler(                                                   # group 2
         MessageHandler(
             filters.ChatType.GROUPS & ~filters.COMMAND, giveaway.on_group_message
