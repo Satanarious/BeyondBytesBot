@@ -392,20 +392,31 @@ async def _tmdb_get(path, params=None):
     """TMDB request with retry. TMDB is served via CloudFront and some edge
     IPs reset TLS handshakes from Oracle-class hosts, so a plain single
     request fails ~2/3 of the time. Each attempt re-resolves DNS and lands
-    on a fresh edge; HTTP-level errors (401 etc.) surface immediately."""
+    on a fresh edge; HTTP-level errors (401 etc.) surface immediately.
+    Accepts either credential: a v3 API key (32 hex chars, sent as
+    ?api_key=) or a v4 API Read Access Token (JWT, sent as Authorization
+    Bearer header — the same value fails if sent the other way)."""
     key = _tmdb_key()
     if not key:
         raise RuntimeError(
             "TMDB_API_KEY missing in the bot .env (free key: "
             "themoviedb.org -> settings -> API)",
         )
+    headers = None
+    if key.startswith("Bearer "):
+        key = key[len("Bearer "):].strip()
+    if key.startswith("eyJ"):                    # v4 read-access token (JWT)
+        headers = {"Authorization": f"Bearer {key}", "User-Agent": _UA}
+        key = None
     params = dict(params or {})
-    params["api_key"] = key
+    if key:
+        params["api_key"] = key
     last = None
     for attempt in range(1, _TMDB_ATTEMPTS + 1):
         try:
             async with aiohttp.ClientSession(
-                timeout=_HTTP, headers={"User-Agent": _UA}
+                timeout=_HTTP,
+                headers=headers or {"User-Agent": _UA},
             ) as session:
                 return await _get_json(session, f"{_TMDB_URL}{path}", params=params)
         except aiohttp.ClientError as exc:          # connection-level failure
