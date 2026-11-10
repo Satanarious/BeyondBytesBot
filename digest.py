@@ -15,7 +15,7 @@ import re
 from datetime import datetime, time, timezone
 
 import aiohttp
-from telegram import LinkPreviewOptions, Update
+from telegram import InputMediaPhoto, LinkPreviewOptions, Update
 from telegram.constants import ParseMode
 from telegram.ext import CommandHandler, ContextTypes
 
@@ -122,25 +122,35 @@ async def process_topic(context, chat_id, thread_id):
     titles = {t["thread_id"]: t["title"] for t in db.topics_for_chat(chat_id)}
     label = _topic_label(titles, thread_id)
     send_thread = thread_id if thread_id != 1 else None
+    images = {row["link"]: (row.get("image_url") or "").strip() for row in items}
+    n_images = sum(1 for img in images.values() if img)
+    model = os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
 
-    log.info("digest: %d collected for '%s' (model %s)", len(items), label,
-             os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite")
+    log.info("digest: %d collected for '%s' (%d with image) (model %s)",
+             len(items), label, n_images, model)
     try:
         picks = await summarize_with_gemini(items)
-        text = _render_digest(picks, label)
+        rows = [{"title": p["title"], "summary": p["summary"], "url": p["url"],
+                 "image": images.get(p["url"], "")} for p in picks]
+        note = None
     except Exception as exc:
         log.warning("gemini digest failed for topic %s: %s", label, exc)
-        text = _fallback_digest(items, label)
+        rows = [{"title": row["title"] or "Untitled", "summary": "",
+                 "url": row["link"], "image": images.get(row["link"], "")}
+                for row in items[:5]]
+        note = "⚠️ AI summary unavailable today"
 
-    await context.bot.send_message(
-        chat_id=chat_id,
-        message_thread_id=send_thread,
-        text=text,
-        parse_mode=ParseMode.HTML,
-        link_preview_options=LinkPreviewOptions(is_disabled=True),
-    )
+    posted = False
+    try:
+        await _send_rich(context, chat_id, send_thread, rows, label, note)
+        posted = True
+    except Exception as exc:
+        log.warning("rich message failed (%s); falling back to album/text", exc)
+    if not posted:
+        await _post_digest(context, chat_id, send_thread, rows, label, note)
     db.clear_pending(chat_id, thread_id)
-    log.info("digest posted for chat %s topic %s (%d collected)",
+    log.info("digest posted via %s for chat %s topic %s (%d collected)",
+             "sendRichMessage" if posted else "album/fallback",
              chat_id, thread_id, len(items))
 
 
@@ -269,13 +279,75 @@ async def summarize_with_gemini(items):
     return picks
 
 
-def _render_digest(picks, label):
+def _caption(number, row):
+    """Rich-text photo caption: numbered heading-with-link + AI summary."""
+    title = " ".join((row.get("title") or "").split())[:140] or "Read the article"
+    parts = [
+        f'{number}. <b><a href="{html.escape(row["url"], quote=True)}">'
+        f'{html.escape(title)}</a></b>'
+    ]
+    summary = " ".join((row.get("summary") or "").split())[:400]
+    if summary:
+        parts.append(html.escape(summary))
+    return "\n".join(parts)
+
+
+def _rich_html(rows, label, note):
+    """Build Rich-Message HTML: image block, heading-with-link, summary per item."""
     today = datetime.now(timezone.utc).strftime("%d %b %Y")
-    out = [f"📰 <b>Daily digest — {html.escape(label)}</b>", f"🗓 {today}", ""]
-    for i, item in enumerate(picks, 1):
-        title = html.escape(" ".join(item["title"].split())[:160])
-        summary = " ".join(item.get("summary", "").split())[:400]
-        out.append(f"{i}. <b><a href=\"{html.escape(item['url'])}\">{title}</a></b>")
+    parts = [
+        f"<h2>📰 Daily digest — {html.escape(label)}</h2>",
+        f"<footer>🗓 {today}</footer>",
+    ]
+    if note:
+        parts.append(f"<p>{html.escape(note)}</p>")
+    for number, row in enumerate(rows, 1):
+        image = _clean_url(row.get("image"))
+        if image:
+            parts.append(f'<img src="{html.escape(image, quote=True)}"/>')
+        title = " ".join((row.get("title") or "").split())[:140] or "Untitled"
+        link = html.escape(row["url"], quote=True)
+        parts.append(
+            f"<h3>{number}. <a href=\"{link}\">{html.escape(title)}</a></h3>"
+        )
+        summary = " ".join((row.get("summary") or "").split())[:400]
+        if summary:
+            parts.append(f"<p>{html.escape(summary)}</p>")
+    parts.append("<footer>✅ Digest complete — tap any headline to open the article.</footer>")
+    return "\n".join(parts)
+
+
+async def _send_rich(context, chat_id, thread, rows, label, note=None):
+    """One sendRichMessage with all 5 stories, images, links and summaries.
+
+    Uses the raw Bot API method (PTB 22.8 predates native rich messages).
+    Raises on any API error — caller falls back to the album/text poster.
+    """
+    rich = {"html": _rich_html(rows, label, note)}
+    await context.bot._post(
+        "sendRichMessage",
+        data={
+            "chat_id": chat_id,
+            "message_thread_id": thread,
+            "rich_message": rich,
+        },
+    )
+
+
+def _text_block(numbered_rows, label, note):
+    """Text digest for items that have no usable image (numbering preserved)."""
+    today = datetime.now(timezone.utc).strftime("%d %b %Y")
+    out = [f"📰 <b>Daily digest — {html.escape(label)}</b>", f"🗓 {today}"]
+    if note:
+        out.append(note)
+    out.append("")
+    for number, row in numbered_rows:
+        title = html.escape(" ".join((row.get("title") or "Untitled").split())[:160])
+        out.append(
+            f'{number}. <b><a href="{html.escape(row["url"], quote=True)}">'
+            f'{title}</a></b>'
+        )
+        summary = " ".join((row.get("summary") or "").split())[:400]
         if summary:
             out.append(html.escape(summary))
         out.append("")
@@ -283,19 +355,75 @@ def _render_digest(picks, label):
     return "\n".join(out).rstrip()
 
 
-def _fallback_digest(items, label):
-    """If Gemini is unreachable, post today's links plainly instead of losing them."""
-    today = datetime.now(timezone.utc).strftime("%d %b %Y")
-    out = [
-        f"📰 <b>Daily digest — {html.escape(label)}</b>",
-        f"🗓 {today}",
-        "⚠️ AI summary unavailable today — here are the collected articles:",
-        "",
-    ]
-    for i, row in enumerate(items[:5], 1):
-        title = html.escape((row["title"] or "Untitled")[:160])
-        out.append(f"{i}. <b><a href=\"{html.escape(row['link'])}\">{title}</a></b>")
-    return "\n".join(out)
+def _clean_url(url):
+    """Telegram media URLs must be a direct http(s) link to an image."""
+    url = str(url or "").strip()
+    return url if url.startswith(("http://", "https://")) else ""
+
+
+async def _post_digest(context, chat_id, thread, rows, label, note=None):
+    """Post the digest: one photo album with rich-text captions, and a text
+    block for any items without a usable image. Numbering runs across all 5."""
+    bot = context.bot
+    media_rows, text_rows = [], []
+    for i, row in enumerate(rows, 1):
+        image = _clean_url(row.get("image"))
+        if image:
+            media_rows.append((i, row, image))
+        else:
+            text_rows.append((i, row))
+
+    async def send_single(n, row, image):
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=image,
+            caption=_caption(n, row)[:1024],
+            parse_mode=ParseMode.HTML,
+            message_thread_id=thread,
+        )
+
+    if media_rows:
+        media = [
+            InputMediaPhoto(
+                media=image,
+                caption=_caption(n, row)[:1024],
+                parse_mode=ParseMode.HTML,
+            )
+            for n, row, image in media_rows
+        ]
+        try:
+            if len(media) == 1:
+                n, row, image = media_rows[0]
+                await send_single(n, row, image)
+                media_rows = []          # posted; not falling back to text
+            else:
+                await bot.send_media_group(
+                    chat_id=chat_id,
+                    media=media,
+                    message_thread_id=thread,
+                )
+                media_rows = []          # posted; not falling back to text
+        except Exception as exc:
+            log.warning("album send failed (%s); trying items one by one", exc)
+            dead = []
+            for n, row, image in media_rows:
+                try:
+                    await send_single(n, row, image)
+                except Exception as single_exc:
+                    log.warning("photo send failed for %s (%s) — text fallback",
+                                image[:120], single_exc)
+                    dead.append((n, row))
+            media_rows = []
+            text_rows.extend(dead)
+
+    if text_rows:
+        await bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread,
+            text=_text_block(text_rows, label, note),
+            parse_mode=ParseMode.HTML,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
 
 
 # ------------------------------------------------------------ commands ------

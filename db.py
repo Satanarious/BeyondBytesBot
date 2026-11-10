@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS pending_articles (
     thread_id INTEGER NOT NULL,
     link      TEXT NOT NULL,
     title     TEXT,
+    image_url TEXT,
     added_at  TEXT NOT NULL,
     UNIQUE (chat_id, thread_id, link)
 );
@@ -89,9 +90,11 @@ def _run(sql, params=(), *, one=False, all_rows=False):
         cur = _conn().execute(sql, params)
         result = None
         if one:
-            result = cur.fetchone()
+            row = cur.fetchone()
+            # return plain dicts (sqlite3.Row has no .get())
+            result = dict(row) if row is not None else None
         elif all_rows:
-            result = cur.fetchall()
+            result = [dict(r) for r in cur.fetchall()]
         _conn().commit()
     return result if (one or all_rows) else cur
 
@@ -99,7 +102,12 @@ def _run(sql, params=(), *, one=False, all_rows=False):
 def init_db():
     with _LOCK:
         _conn().executescript(SCHEMA)
-        _conn().commit()
+        conn = _conn()
+        # migration: image_url added in Nov 2026 (photo-album digest format)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(pending_articles)")}
+        if "image_url" not in cols:
+            conn.execute("ALTER TABLE pending_articles ADD COLUMN image_url TEXT")
+        conn.commit()
 
 
 # ---------------------------------------------------------------- topics ---
@@ -193,13 +201,17 @@ def add_seen_link(sub_id, link):
 PENDING_CAP = 40   # max articles kept per topic between digests
 
 
-def add_pending(chat_id, thread_id, link, title):
+def add_pending(chat_id, thread_id, link, title, image_url=None):
     """Queue one article for the next daily digest of this topic (newest kept)."""
     with _LOCK:
         _conn().execute(
-            "INSERT OR IGNORE INTO pending_articles "
-            "(chat_id, thread_id, link, title, added_at) VALUES (?, ?, ?, ?, ?)",
-            (chat_id, thread_id, link, title, datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO pending_articles "
+            "(chat_id, thread_id, link, title, image_url, added_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (chat_id, thread_id, link) DO UPDATE SET "
+            "image_url = COALESCE(NULLIF(pending_articles.image_url, ''), excluded.image_url)",
+            (chat_id, thread_id, link, title, image_url,
+             datetime.now(timezone.utc).isoformat()),
         )
         _conn().execute(
             "DELETE FROM pending_articles WHERE chat_id = ? AND thread_id = ? "
@@ -220,7 +232,7 @@ def pending_topics():
 
 def get_pending(chat_id, thread_id):
     return _run(
-        "SELECT link, title, added_at FROM pending_articles "
+        "SELECT link, title, image_url, added_at FROM pending_articles "
         "WHERE chat_id = ? AND thread_id = ? ORDER BY id",
         (chat_id, thread_id), all_rows=True,
     ) or []

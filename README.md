@@ -8,7 +8,11 @@ A Telegram bot for a **single group with topics** (Beyond Bytes). It has two fea
    each summary carrying the article link to read more. The collected links are
    stored server-side, processed by Gemini, then **deleted after the digest is
    posted**. `/updatetime` controls feed-check frequency, `/timetopost` the daily
-   posting time.
+   posting time. Each digest is a single **rich message** (Bot API
+   `sendRichMessage`): the article's own image (harvested from the RSS entry)
+   above a bold numeric heading that is embedded as a link to the article,
+   followed by the AI summary. If rich messages are unavailable the digest
+   falls back to a photo album with the same layout, then to plain text.
 2. **Giveaways / gifting** — a wizard that builds a giveaway announcement with a
    name, description, image and duration, and a **🎟 Join button** — only members
    who tap it are enrolled. Giveaways are bound to the topic they were

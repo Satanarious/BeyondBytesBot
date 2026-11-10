@@ -28,6 +28,41 @@ _MAX_LINKS_PER_POLL = 5   # max new articles sent per feed per poll
 _MAX_NEW_SCAN = 50        # how many newest entries we scan per fetch
 
 _URL_RE = re.compile(r"^https?://", re.I)
+_IMG_SRC_RE = re.compile(
+    r"<img[^>]+src=[\"']([^\"']+\.(?:jpg|jpeg|png|webp|gif)[^\"']*)[\"']",
+    re.I,
+)
+
+
+def _entry_image(entry):
+    """Best-effort article image from a feedparser entry (or None)."""
+    # 1) media:thumbnail / media:content
+    for key in ("media_thumbnail", "media_content"):
+        for media in entry.get(key) or []:
+            img = str(media.get("url") or "").strip()
+            if img.startswith("http"):
+                return img
+    # 2) image enclosures
+    for enc in entry.get("enclosures") or []:
+        url = str(enc.get("href") or enc.get("url") or "").strip()
+        etype = str(enc.get("type") or "")
+        ends_img = url.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+        if url.startswith("http") and ("image" in etype or ends_img):
+            return url
+    # 3) first <img src=...> in the entry content/summary html
+    blobs = []
+    summary = entry.get("summary")
+    if isinstance(summary, str):
+        blobs.append(summary)
+    for content in entry.get("content") or []:
+        value = content.get("value") if isinstance(content, dict) else None
+        if value:
+            blobs.append(value)
+    for blob in blobs:
+        match = _IMG_SRC_RE.search(blob)
+        if match:
+            return match.group(1).strip()
+    return None
 
 
 async def _fetch(url):
@@ -40,7 +75,8 @@ async def _fetch(url):
 
 
 async def fetch_feed(url):
-    """Download + parse a feed. Returns (feed_title, [(link, title), ...] newest first)."""
+    """Download + parse a feed.
+    Returns (feed_title, [(link, title, image_url_or_None), ...] newest first)."""
     raw = await _fetch(url)
     parsed = await asyncio.to_thread(feedparser.parse, raw)
     entries = parsed.entries or []
@@ -63,7 +99,7 @@ async def fetch_feed(url):
         if not link or not link.startswith("http"):
             continue
         title = (entry.get("title") or "").strip() or "Untitled"
-        links.append((link, title))
+        links.append((link, title, _entry_image(entry)))
     if not links:
         raise ValueError("feed has no entries with usable links")
     return (feed_title or url), links
@@ -80,10 +116,10 @@ async def check_feed(context, sub):
         db.update_subscription_title(sub["id"], feed_title)
 
     seen = db.seen_links(sub["id"])
-    for link, title in entries:
+    for link, title, image in entries:
         if link in seen:
             continue
-        db.add_pending(sub["chat_id"], sub["thread_id"], link, title)
+        db.add_pending(sub["chat_id"], sub["thread_id"], link, title, image)
         db.add_seen_link(sub["id"], link)  # never offered twice, even across digests
 
 
@@ -215,7 +251,7 @@ async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     sub_id = db.add_subscription(chat.id, thread_id, url, feed_title)
     # Treat the current backlog as already seen so we only announce new articles.
-    for link, _ in entries:
+    for link, _, _ in entries:
         db.add_seen_link(sub_id, link)
 
     await status.edit_text(
