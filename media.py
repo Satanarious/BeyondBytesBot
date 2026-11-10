@@ -361,15 +361,10 @@ async def _ol_enrich(row):
     return row
 
 
-# ---------------------------------------------------------------- IMDb ------
+# ---------------------------------------------------------------- TMDB -------
 
-_IMDB_SUGGEST_URL = "https://v3.sg.media-imdb.com/suggestion/x/{q}.json"
-_IMDB_TYPES = {
-    "movie": "Movie", "tvSeries": "TV Series", "tvMiniSeries": "TV Mini Series",
-    "short": "Short", "tvShort": "TV Short", "tvEpisode": "Episode",
-    "video": "Video", "videoGame": "Video Game", "musicVideo": "Music Video",
-    "podcastSeries": "Podcast Series", "tvSpecial": "TV Special",
-}
+_TMDB_URL = "https://api.themoviedb.org/3"
+_TMDB_IMG = "https://image.tmdb.org/t/p/w500"
 
 
 def _human_duration(minutes):
@@ -385,67 +380,79 @@ def _human_duration(minutes):
     return f"{m}m"
 
 
-async def _imdb_search(session, q, limit=8):
-    """Keyless search via IMDb's own suggestion endpoint (what imdb.com's
-    search box uses). Rows are thin; the detail card needs either OMDb or the
-    suggestion fields alone."""
-    from urllib.parse import quote as _urlquote
-    data = await _get_json(session, _IMDB_SUGGEST_URL.format(q=_urlquote(q.strip())))
+def _tmdb_key():
+    """v3 API key (or a v4 read-access token works with ?api_key= too)."""
+    return (os.getenv("TMDB_API_KEY") or os.getenv("TMDB_KEY") or "").strip()
+
+
+async def _tmdb_search(session, q, limit=8):
+    """Search movies + TV via TMDB /search/multi. Person entries are skipped."""
+    api_key = _tmdb_key()
+    if not api_key:
+        raise RuntimeError(
+            "TMDB_API_KEY missing in the bot .env (free key: "
+            "themoviedb.org -> settings -> API)"
+        )
+    data = await _get_json(
+        session, f"{_TMDB_URL}/search/multi",
+        params={"api_key": api_key, "query": q, "page": 1,
+                "include_adult": "false", "language": "en-US"},
+    )
     rows = []
-    for item in (data.get("d") or []):
-        if not str(item.get("id") or "").startswith("tt"):
-            continue                     # skip people & companies in results
-        imdb_id = item["id"]
-        poster = ((item.get("i") or {}).get("imageUrl") or "")
-        year = item.get("y") or item.get("tl") or ""
-        stars = _strip_html(item.get("s") or "")
-        items = []
-        kind = _IMDB_TYPES.get(item.get("qid") or item.get("q") or "",
-                              _strip_html(item.get("qid") or "").title())
-        if kind:
-            items.append(f"Type: {kind}")
+    for item in (data.get("results") or []):
+        kind = item.get("media_type")
+        if kind not in ("movie", "tv"):
+            continue                     # persons/companies are not 'titles'
+        ttype = "movie" if kind == "movie" else "tv"
+        title = _strip_html(item.get("title") or item.get("name")) or "Unknown title"
+        date = item.get("release_date") or item.get("first_air_date") or ""
+        year = date[:4] if date else ""
+        score = item.get("vote_average") or None
+        votes = item.get("vote_count") or 0
+        poster = item.get("poster_path") or item.get("backdrop_path") or ""
+        items = [
+            f"Type: {'Movie' if ttype == 'movie' else 'TV Series'}",
+        ]
         if year:
             items.append(f"Year: {year}")
-        if stars:
-            items.append(f"Starring: {stars[:120]}")
+        if votes:
+            items.append(f"Votes: {votes:,}")
         rows.append({
-            "title": _strip_html(item.get("l")) or "Unknown title",
-            "url": f"https://www.imdb.com/title/{imdb_id}/",
-            "image": _abs_url(poster),
-            "score": None,           # IMDb rating arrives via _imdb_enrich
+            "title": title,
+            "url": f"https://www.themoviedb.org/{ttype}/{item.get('id')}",
+            "image": _abs_url(f"{_TMDB_IMG}{poster}") if poster else "",
+            "score": score,
             "score_scale": 10,
-            "source": "IMDb",
-            "source_url": "IMDb",
+            "source": "TMDB",
+            "source_url": "TMDB",
             "button_line": " · ".join(
                 part for part in (
-                    str(year), _strip_html(stars[:64]) if stars else "",
+                    year,
+                    _score_text({"score": score, "score_scale": 10}, short=True) or "",
                 ) if part
             ),
             "details": items,
-            "synopsis": "",
-            "imdb_id": imdb_id,
+            # /search/multi carries a short overview already — cards render
+            # even if enrichment fails; tap pulls runtime/genres/cast too.
+            "synopsis": _synopsis(item.get("overview"), limit=700),
+            "tmdb_type": ttype,
+            "tmdb_id": str(item.get("id") or ""),
         })
         if len(rows) >= limit:
             break
     return rows
 
 
-async def _lookup_imdb(session, q):
-    rows = await _imdb_search(session, q)
-    note = None
-    if rows and not (os.getenv("OMDB_API_KEY") or "").strip():
-        note = "add OMDB_API_KEY for rating & plot (free key at omdbapi.com)"
-    return rows, note
+async def _lookup_tmdb(session, q):
+    return await _tmdb_search(session, q), None
 
 
-async def _imdb_enrich(row):
-    """Fetch full title details via OMDb (free key) for the tapped card.
-    Survives a missing/invalid key — suggestion-level data still renders."""
-    imdb_id = row.get("imdb_id")
-    if not imdb_id:
-        return row
-    api_key = (os.getenv("OMDB_API_KEY") or "").strip()
-    if not api_key:
+async def _tmdb_enrich(row):
+    """Fetch runtime/genres/cast/credits for the tapped card from the title
+    endpoint. The card already renders with search-level data if this fails."""
+    ttype, tmdb_id = row.get("tmdb_type"), row.get("tmdb_id")
+    api_key = _tmdb_key()
+    if not ttype or not tmdb_id or not api_key:
         return row
     timeout = aiohttp.ClientTimeout(total=10, connect=5)
     async with aiohttp.ClientSession(
@@ -453,64 +460,59 @@ async def _imdb_enrich(row):
     ) as session:
         try:
             data = await _get_json(
-                session, "https://www.omdbapi.com/",
-                params={"i": imdb_id, "plot": "full", "r": "json",
-                        "apikey": api_key},
+                session, f"{_TMDB_URL}/{ttype}/{tmdb_id}",
+                params={"api_key": api_key, "language": "en-US",
+                        "append_to_response": "credits"},
             )
         except Exception as exc:
-            log.info("imdb enrich: OMDb failed for %s (%s)", imdb_id, exc)
+            log.info("tmdb enrich failed for %s/%s (%s)", ttype, tmdb_id, exc)
             return row
-    if (data.get("Response") or "").lower() != "true":
-        log.info("imdb enrich: OMDb error for %s: %s",
-                 imdb_id, data.get("Error"))
-        return row
 
     items = []
-    rated = data.get("Rated")
-    if rated and rated not in ("N/A", "Not Rated", "Unrated"):
-        items.append(f"Rated: {rated}")
-    runtime = _human_duration(data.get("Runtime"))
-    if runtime:
-        items.append(f"Runtime: {runtime}")
-    released = data.get("Released")
-    if released and released != "N/A":
-        items.append(f"Released: {released}")
-    director = data.get("Director")
-    if director and director != "N/A":
-        items.append(f"Director: {director}")
-    votes = data.get("imdbVotes")
-    if votes and votes != "N/A":
-        votes = str(votes).strip()
-        if votes.replace(",", "").isdigit():
-            items.append(f"Votes: {int(votes.replace(',', '')):,}")
-        else:
-            items.append(f"Votes: {votes}")
-    awards = data.get("Awards")
-    if awards and awards not in ("N/A", ""):
-        items.append(f"Awards: {awards[:200]}")
+    if ttype == "movie":
+        runtime = _human_duration(data.get("runtime"))
+        if runtime:
+            items.append(f"Runtime: {runtime}")
+    else:
+        seasons = data.get("number_of_seasons")
+        episodes = data.get("number_of_episodes")
+        if seasons:
+            tail = f" · {episodes} ep" if episodes else ""
+            items.append(f"Seasons: {seasons}{tail}")
+        ep_runtime = (data.get("episode_run_time") or [])
+        if ep_runtime and ep_runtime[0]:
+            items.append(f"Episode: {_human_duration(ep_runtime[0])}")
 
-    genres = [g.strip() for g in (data.get("Genre") or "").split(",")
-              if g.strip() and g.strip() != "N/A"]
+    cast = ((data.get("credits") or {}).get("cast") or [])[:5]
+    names = [c.get("name") for c in cast if c.get("name")]
+    if names:
+        items.append("Starring: " + ", ".join(names))
+
+    crew = ((data.get("credits") or {}).get("crew") or [])
+    if ttype == "movie":
+        makers = [c.get("name") for c in crew if c.get("job") == "Director"
+                  and c.get("name")]
+        if makers:
+            items.append("Director: " + ", ".join(dict.fromkeys(makers)))
+    else:
+        makers = [c.get("name") for c in (data.get("created_by") or [])[:3]
+                  if c.get("name")]
+        if makers:
+            items.append("Creator: " + ", ".join(makers))
+
+    votes = data.get("vote_count")
+    if votes:
+        items.append(f"Votes: {votes:,}")
+
+    genres = [g.get("name") for g in (data.get("genres") or []) if g.get("name")]
     if genres:
         items.append("Genres: " + ", ".join(genres[:6]))
 
-    plot = _strip_html(data.get("Plot") or "")
-    rating = data.get("imdbRating")
-    if rating and rating not in ("N/A",):
-        try:
-            row["score"] = float(rating)
-            row["score_scale"] = 10
-        except ValueError:
-            pass
-
-    merged = [line for line in (row.get("details") or [])
-              if not str(line).startswith(("Genres", "Starring"))]
-    starring = _strip_html(data.get("Actors") or "")
-    if starring and starring != "N/A":
-        merged.append(f"Starring: {starring[:150]}")
-    row["details"] = merged + items
-    if plot:
-        row["synopsis"] = plot
+    row["details"] = items
+    score = data.get("vote_average")
+    if score:
+        row["score"] = score
+        row["score_scale"] = 10
     return row
 
 
@@ -806,11 +808,11 @@ async def on_look_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 row = await _ol_enrich(row)
             except Exception as exc:
                 log.info("ol enrich failed on tap (%s)", exc)
-        if row.get("imdb_id"):
+        if row.get("tmdb_id"):
             try:
-                row = await _imdb_enrich(row)
+                row = await _tmdb_enrich(row)
             except Exception as exc:
-                log.info("imdb enrich failed on tap (%s)", exc)
+                log.info("tmdb enrich failed on tap (%s)", exc)
         try:
             await query.message.delete()    # list goes away once a pick is made
         except Exception:
@@ -826,7 +828,7 @@ _LOOKUPS = {
     "eac": _lookup_manga,
     "comic": _lookup_comic,
     "book": _lookup_book,
-    "imdb": _lookup_imdb,
+    "tmdb": _lookup_tmdb,
 }
 
 _HEADERS = {
@@ -834,7 +836,7 @@ _HEADERS = {
     "eac": "📚 Manga / manhwa / manhua results",
     "comic": "💥 Comic results",
     "book": "📖 Book results",
-    "imdb": "🎥 IMDb results",
+    "tmdb": "🍿 Movies & TV results",
 }
 
 _EXAMPLES = {
@@ -842,7 +844,7 @@ _EXAMPLES = {
     "eac": "solo leveling",
     "comic": "batman year one",
     "book": "dune frank herbert",
-    "imdb": "inception",
+    "tmdb": "the dark knight",
 }
 
 
@@ -904,7 +906,7 @@ cmd_anime = group_command()(_make_cmd("anime"))
 cmd_eac = group_command()(_make_cmd("eac"))
 cmd_comic = group_command()(_make_cmd("comic"))
 cmd_book = group_command()(_make_cmd("book"))
-cmd_imdb = group_command()(_make_cmd("imdb"))
+cmd_tmdb = group_command()(_make_cmd("tmdb"))
 
 
 def build_handlers():
@@ -916,6 +918,8 @@ def build_handlers():
         CommandHandler("book", cmd_book),
         CommandHandler("books", cmd_book),      # plural alias
         CommandHandler("comics", cmd_comic),    # plural alias
-        CommandHandler("imdb", cmd_imdb),
+        CommandHandler("tmdb", cmd_tmdb),
+        CommandHandler("movies", cmd_tmdb),     # alias
+        CommandHandler("movie", cmd_tmdb),      # alias
     ]
     return handlers

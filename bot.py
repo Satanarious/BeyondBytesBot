@@ -74,7 +74,7 @@ async def post_init(app):
             BotCommand("eac", "Manga/manhwa/manhua: /eac solo leveling"),
             BotCommand("books", "Book info (OpenLibrary): /books dune"),
             BotCommand("comics", "Comics (ComicVine→OpenLibrary): /comics batman"),
-            BotCommand("imdb", "Movies & TV (IMDb): /imdb inception"),
+            BotCommand("tmdb", "Movies & TV (TMDB): /tmdb the dark knight"),
         ]
     )
 

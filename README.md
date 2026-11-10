@@ -37,8 +37,7 @@ A Telegram bot for a **single group with topics** (Beyond Bytes). It has two fea
 | `/eac` | Manga / manhwa / manhua from MAL (AniList fallback) — **any member**: `/eac solo leveling` |
 | `/books` (alias `/book`) | Book info from OpenLibrary — **any member**: `/books dune` |
 | `/comics` (alias `/comic`) | Comic info from ComicVine (OpenLibrary fallback) — **any member**: `/comics batman` |
-| `/imdb` | Movies & TV from IMDb — **any member**: `/imdb inception`. Suggestions (title/year/cast/poster) are keyless; add `OMDB_API_KEY=` to `.env` for rating, plot, runtime, genres, director & awards on the detail card |
-
+| `/tmdb` (`/movie`, `/movies`) | Movies & TV from TMDB — **any member**: `/tmdb the dark knight`. Needs a free `TMDB_API_KEY=` in `.env` (themoviedb.org → Settings → API); search results already carry rating + overview, tapping adds runtime/seasons, director/creator, cast, genres, vote counts |
 **Lookup UX:** every lookup shows a **tappable suggestion list** (5 per page, ◀▶ to scroll, ✖ to close). Tap an entry and the list disappears and a **detailed card** is posted in that topic: cover art inline, title link, score/author/episodes/publisher meta lines, genres, and the full synopsis in an expandable quote. No API keys needed for `/anime`, `/eac`, `/books` (`/comics` is richer with a free ComicVine key).
 | `/cancel` | Cancel the raffle wizard mid-way |
 
@@ -107,8 +106,7 @@ BBbot/
      eac - Manga/manhwa/manhua: /eac solo leveling
      books - Book info (OpenLibrary): /books dune
      comics - Comics (ComicVine→OpenLibrary): /comics batman
-     imdb - Movies & TV (IMDb): /imdb inception
-     cancel - Cancel the current operation
+     tmdb - Movies & TV (TMDB): /tmdb the dark knight     cancel - Cancel the current operation
      ```
 5. Optional: `/setuserpic` to add a profile image.
 
