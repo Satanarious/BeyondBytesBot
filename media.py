@@ -14,6 +14,7 @@ Note: Jikan/MAL is unreachable from some datacenter hosts (Oracle Cloud) — the
 AniList fallback then serves results automatically and is labelled as such.
 """
 
+import asyncio
 import html as _html
 import logging
 import os
@@ -365,6 +366,8 @@ async def _ol_enrich(row):
 
 _TMDB_URL = "https://api.themoviedb.org/3"
 _TMDB_IMG = "https://image.tmdb.org/t/p/w500"
+_TMDB_ATTEMPTS = 4                    # CloudFront edges reset some connections
+_TMDB_RETRY_DELAY = 0.5
 
 
 def _human_duration(minutes):
@@ -385,17 +388,50 @@ def _tmdb_key():
     return (os.getenv("TMDB_API_KEY") or os.getenv("TMDB_KEY") or "").strip()
 
 
-async def _tmdb_search(session, q, limit=8):
-    """Search movies + TV via TMDB /search/multi. Person entries are skipped."""
-    api_key = _tmdb_key()
-    if not api_key:
+async def _tmdb_get(path, params=None):
+    """TMDB request with retry. TMDB is served via CloudFront and some edge
+    IPs reset TLS handshakes from Oracle-class hosts, so a plain single
+    request fails ~2/3 of the time. Each attempt re-resolves DNS and lands
+    on a fresh edge; HTTP-level errors (401 etc.) surface immediately."""
+    key = _tmdb_key()
+    if not key:
         raise RuntimeError(
             "TMDB_API_KEY missing in the bot .env (free key: "
-            "themoviedb.org -> settings -> API)"
+            "themoviedb.org -> settings -> API)",
         )
-    data = await _get_json(
-        session, f"{_TMDB_URL}/search/multi",
-        params={"api_key": api_key, "query": q, "page": 1,
+    params = dict(params or {})
+    params["api_key"] = key
+    last = None
+    for attempt in range(1, _TMDB_ATTEMPTS + 1):
+        try:
+            async with aiohttp.ClientSession(
+                timeout=_HTTP, headers={"User-Agent": _UA}
+            ) as session:
+                return await _get_json(session, f"{_TMDB_URL}{path}", params=params)
+        except aiohttp.ClientError as exc:          # connection-level failure
+            last = exc
+            log.info("tmdb: attempt %d/%d failed (%s); retrying",
+                     attempt, _TMDB_ATTEMPTS, exc)
+            if attempt < _TMDB_ATTEMPTS:
+                await asyncio.sleep(_TMDB_RETRY_DELAY)
+        except RuntimeError as exc:
+            if "HTTP 401" in str(exc):
+                raise RuntimeError(
+                    "TMDB rejected the API key (HTTP 401) — TMDB_API_KEY in "
+                    "the bot .env is invalid (get it from themoviedb.org "
+                    "-> settings -> API)",
+                ) from None
+            raise
+    raise RuntimeError(f"TMDB unreachable after {_TMDB_ATTEMPTS} attempts ({last})")
+
+
+async def _tmdb_search(session, q, limit=8):
+    """Search movies + TV via TMDB /search/multi. Person entries are skipped.
+    The session argument is unused — TMDB calls manage their own connections
+    so each retry lands on a fresh CloudFront edge."""
+    data = await _tmdb_get(
+        "/search/multi",
+        params={"query": q, "page": 1,
                 "include_adult": "false", "language": "en-US"},
     )
     rows = []
@@ -454,19 +490,14 @@ async def _tmdb_enrich(row):
     api_key = _tmdb_key()
     if not ttype or not tmdb_id or not api_key:
         return row
-    timeout = aiohttp.ClientTimeout(total=10, connect=5)
-    async with aiohttp.ClientSession(
-        timeout=timeout, headers={"User-Agent": _UA}
-    ) as session:
-        try:
-            data = await _get_json(
-                session, f"{_TMDB_URL}/{ttype}/{tmdb_id}",
-                params={"api_key": api_key, "language": "en-US",
-                        "append_to_response": "credits"},
-            )
-        except Exception as exc:
-            log.info("tmdb enrich failed for %s/%s (%s)", ttype, tmdb_id, exc)
-            return row
+    try:
+        data = await _tmdb_get(
+            f"/{ttype}/{tmdb_id}",
+            params={"language": "en-US", "append_to_response": "credits"},
+        )
+    except Exception as exc:
+        log.info("tmdb enrich failed for %s/%s (%s)", ttype, tmdb_id, exc)
+        return row
 
     items = []
     if ttype == "movie":
